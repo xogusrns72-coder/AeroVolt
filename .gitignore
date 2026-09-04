@@ -23,3 +23,6 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Claude Code 세션 파일
+.claude/scheduled_tasks.lock

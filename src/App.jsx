@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { fetchPartners, updatePartner } from "./api/dataService";
+import { loadPartners, updatePartner } from "./api/dataService";
 import { withComputedFields } from "./utils/scoring";
 import FilterBar from "./components/FilterBar";
 import ScreeningSummary from "./components/ScreeningSummary";
@@ -7,6 +7,10 @@ import SummaryCards from "./components/SummaryCards";
 import PartnerTable from "./components/PartnerTable";
 import DetailPanel from "./components/DetailPanel";
 import ContactView from "./components/ContactView";
+import ConnectionBanner from "./components/ConnectionBanner";
+import MailerModal from "./components/mailer/MailerModal";
+import { DEFAULT_GRADE_FILTER, DEFAULT_MIN_SCORE } from "./data/outreachFilters";
+import useOutreachStore from "./hooks/useOutreachStore";
 import "./App.css";
 
 const EMPTY_FILTERS = {
@@ -24,13 +28,39 @@ export default function App() {
   const [selectedId, setSelectedId] = useState(null);
   const [activeTab, setActiveTab] = useState("all"); // "all" | "contact"
   const [loading, setLoading] = useState(true);
+  const [mailerOpen, setMailerOpen] = useState(false);
 
+  // 발송 콘솔의 저장소(연락처·발송기록·템플릿)는 모달 밖에서 관리한다 —
+  // 모달을 닫아도 값이 유지되고, 버튼 배지도 이 값을 참조한다.
+  const outreachStore = useOutreachStore();
+
+  const [dataError, setDataError] = useState(null);
+  const [reloadTick, setReloadTick] = useState(0);
+  const [retrying, setRetrying] = useState(false);
+
+  // 다시 시도할 때는 화면을 "불러오는 중..."으로 비우지 않는다 — 이미 보고 있던 표를 유지한 채
+  // 배너의 버튼만 진행 중 상태로 바꾼다.
   useEffect(() => {
-    fetchPartners().then((rows) => {
-      setPartners(rows.map(withComputedFields));
-      setLoading(false);
-    });
-  }, []);
+    let alive = true;
+    loadPartners()
+      .then(({ rows, error }) => {
+        if (!alive) return;
+        setPartners(rows.map(withComputedFields));
+        setDataError(error);
+      })
+      .catch((e) => {
+        if (!alive) return;
+        setDataError(e?.message || String(e));
+      })
+      .finally(() => {
+        if (!alive) return;
+        setLoading(false);
+        setRetrying(false);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [reloadTick]);
 
   const countries = useMemo(() => Array.from(new Set(partners.map((p) => p.country))).sort(), [partners]);
   const types = useMemo(() => Array.from(new Set(partners.map((p) => p.type))).sort(), [partners]);
@@ -66,6 +96,19 @@ export default function App() {
 
   const selectedPartner = partners.find((p) => p.id === selectedId) || null;
 
+  // 발송 버튼 배지 = 발송 콘솔 기본 필터(A·B 등급 + 15점 이상)에서 아직 발송하지 않은 곳.
+  const sentRecords = outreachStore.data.sent;
+  const mailCandidateCount = useMemo(
+    () =>
+      partners.filter(
+        (p) =>
+          DEFAULT_GRADE_FILTER[p.display_grade] &&
+          p.total_score >= DEFAULT_MIN_SCORE &&
+          sentRecords[p.id]?.status !== "sent"
+      ).length,
+    [partners, sentRecords]
+  );
+
   const handleSavePartner = async (updated) => {
     setPartners((prev) => prev.map((p) => (p.id === updated.id ? updated : p)));
     await updatePartner(updated);
@@ -97,6 +140,17 @@ export default function App() {
         </div>
       </header>
 
+      {dataError && (
+        <ConnectionBanner
+          error={dataError}
+          retrying={retrying}
+          onRetry={() => {
+            setRetrying(true);
+            setReloadTick((n) => n + 1);
+          }}
+        />
+      )}
+
       <FilterBar filters={filters} onChange={setFilters} countries={countries} types={types} />
 
       <ScreeningSummary partners={filteredPartners} />
@@ -115,6 +169,10 @@ export default function App() {
           onClick={() => setActiveTab("contact")}
         >
           컨택 실행 뷰 (A·B 등급)
+        </button>
+        <button className="mailer-open-btn" onClick={() => setMailerOpen(true)}>
+          메일 발송
+          <span className="mailer-open-badge">{mailCandidateCount}</span>
         </button>
       </div>
 
@@ -140,6 +198,13 @@ export default function App() {
           onSave={handleSavePartner}
         />
       )}
+
+      <MailerModal
+        open={mailerOpen}
+        onClose={() => setMailerOpen(false)}
+        partners={partners}
+        store={outreachStore}
+      />
     </div>
   );
 }

@@ -1,4 +1,4 @@
-import { SHEETS_API_URL } from "../config";
+import { getApiUrl } from "./endpoint";
 import scoreSeed from "../data/mockPartners.json";
 
 // "sheets" 모드: 업체 기본정보(국가·업체명·유형·웹사이트 등)는 Google Sheets에서 실시간으로
@@ -9,12 +9,11 @@ import scoreSeed from "../data/mockPartners.json";
 // "시드"로 그대로 재사용한다(업체명+국가로 매칭). 시트에 새로 추가된 업체는 시드에 없으므로
 // 미채점 상태(0점)로 시작해서 상세 패널에서 바로 채점할 수 있다.
 
-function assertConfigured() {
-  if (!SHEETS_API_URL) {
-    throw new Error(
-      "SHEETS_API_URL이 설정되지 않았습니다. src/config.js에서 Apps Script Web App URL을 입력하세요."
-    );
-  }
+// 실패했을 때 "무엇을 확인해야 하는지"까지 알려준다 — 배포를 다시 하면 가장 자주 깨지는 지점이다.
+function connectionError(reason) {
+  const err = new Error(reason);
+  err.isConnectionError = true;
+  return err;
 }
 
 function norm(s) {
@@ -91,10 +90,45 @@ function mergeRow(row, idx) {
 // Apps Script doGet(e) → "업체리스트" 시트를 12개 컬럼 그대로 JSON 배열로 반환한다고 가정.
 // 응답 형식: [{ country, company_name, region, type, business_scope, founded, parent_company, website }, ...]
 export async function fetchPartners() {
-  assertConfigured();
-  const res = await fetch(SHEETS_API_URL, { method: "GET" });
-  if (!res.ok) throw new Error(`시트 데이터 조회 실패: ${res.status}`);
-  const rows = await res.json();
+  const url = getApiUrl();
+  if (!url) {
+    throw connectionError(
+      "Apps Script 웹앱 주소가 설정되지 않았습니다. 배포 URL(/exec)을 입력해주세요."
+    );
+  }
+
+  let res;
+  try {
+    res = await fetch(url, { method: "GET" });
+  } catch {
+    // 네트워크 오류와 CORS 차단이 모두 여기로 떨어진다(브라우저가 이유를 구분해주지 않는다).
+    throw connectionError(
+      "웹앱에 연결하지 못했습니다. 배포가 삭제됐거나 URL이 바뀌었거나, 액세스 권한이 '모든 사용자'가 아닐 수 있습니다."
+    );
+  }
+
+  if (!res.ok) {
+    throw connectionError(`웹앱이 ${res.status} 오류를 돌려줬습니다. 배포 상태를 확인해주세요.`);
+  }
+
+  const text = await res.text();
+  let rows;
+  try {
+    rows = JSON.parse(text);
+  } catch {
+    // 로그인 페이지나 스크립트 오류 페이지가 HTML로 돌아오는 경우.
+    throw connectionError(
+      /accounts\.google\.com|ServiceLogin/i.test(text)
+        ? "웹앱이 로그인을 요구하고 있습니다. 배포 설정에서 액세스 권한을 '모든 사용자'로 바꿔주세요."
+        : "웹앱이 JSON 대신 오류 페이지를 돌려줬습니다. Apps Script 편집기에서 doGet 실행 오류가 없는지 확인해주세요."
+    );
+  }
+
+  if (rows && rows.error) throw connectionError(rows.error);
+  if (!Array.isArray(rows)) {
+    throw connectionError("웹앱 응답이 업체 목록 배열이 아닙니다. 시트 탭 이름('업체리스트')을 확인해주세요.");
+  }
+
   return rows.map(mergeRow);
 }
 
