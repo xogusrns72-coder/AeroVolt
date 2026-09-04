@@ -66,6 +66,9 @@ function buildFresh(row, idx) {
     expected: "",
     contact_status: "미컨택",
     note: "",
+    // 시트 M열(또는 "이메일" 헤더) 값 — 발송 화면의 초기값으로 쓴다.
+    sheet_email: row.email || "",
+    sheet_person: row.person || "",
   };
 }
 
@@ -84,6 +87,8 @@ function mergeRow(row, idx) {
     founded: row.founded,
     parent_company: row.parent_company,
     website: row.website,
+    sheet_email: row.email || "",
+    sheet_person: row.person || "",
   };
 }
 

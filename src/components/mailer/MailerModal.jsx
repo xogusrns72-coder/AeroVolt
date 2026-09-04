@@ -36,7 +36,7 @@ function timeStamp(at) {
 
 export default function MailerModal({ open, onClose, partners, store }) {
   const { data, actions, saveState, lastSavedAt, dbOn, flushSave } = store;
-  const { contacts, sent, templates, activeTemplateId } = data;
+  const { contacts: rawContacts, sent, templates, activeTemplateId } = data;
 
   const [grades, setGrades] = useState(DEFAULT_GRADE_FILTER);
   const [minScore, setMinScore] = useState(DEFAULT_MIN_SCORE);
@@ -73,6 +73,26 @@ export default function MailerModal({ open, onClose, partners, store }) {
     () => Math.max(10, Math.ceil(partners.reduce((m, p) => Math.max(m, p.total_score || 0), 0))),
     [partners]
   );
+
+  /*
+    화면에서 실제로 쓰는 연락처 = 시트 값 위에 이 브라우저에서 고친 값을 덮은 것.
+
+    시트(구글시트 이메일 열)는 팀이 같이 채우는 공용 출처이고, 표에서 직접 고친 값은
+    그 사람의 로컬 수정이다. 로컬에 손댄 적이 있으면(빈 문자열로 지운 것 포함) 그 값이
+    이기고, 손댄 적이 없는 항목만 시트 값으로 채운다.
+  */
+  const contacts = useMemo(() => {
+    const merged = {};
+    partners.forEach((p) => {
+      const local = rawContacts[p.id] || {};
+      merged[p.id] = {
+        ...local,
+        email: local.email !== undefined ? local.email : p.sheet_email || "",
+        person: local.person !== undefined ? local.person : p.sheet_person || "",
+      };
+    });
+    return merged;
+  }, [partners, rawContacts]);
 
   const liveRows = useMemo(() => {
     const q = query.trim().toLowerCase();

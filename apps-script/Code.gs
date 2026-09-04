@@ -24,6 +24,13 @@
  * ────────────────────────────────────────────────────────────────
  */
 
+/**
+ * 배포된 코드가 최신인지 즉시 확인하기 위한 표식.
+ * 브라우저에서 웹앱 URL 뒤에 ?action=version 을 붙여 열면 이 값이 보인다.
+ * 편집기에서 코드를 고쳐도 "새 버전"으로 배포하지 않으면 옛 값이 그대로 나온다.
+ */
+var SCRIPT_VERSION = "2026-09-04-email";
+
 var SHEET_NAME = "업체리스트";
 
 /**
@@ -62,6 +69,39 @@ var FIELD_MAP = {
   website: "웹사이트",
 };
 
+/*
+  연락처 열 — 메일 발송 화면이 이 값을 초기값으로 쓴다.
+
+  헤더 이름으로 먼저 찾고(아래 후보 중 아무거나), 못 찾으면 M열(13번째)을 본다.
+  다만 M열을 쓸 때는 실제로 이메일처럼 생긴 값이 있는지 확인한 뒤에만 채택한다 —
+  헤더 없이 엉뚱한 열을 이메일로 읽어들이는 사고를 막기 위해서다.
+*/
+var EMAIL_HEADERS = ["이메일", "메일", "이메일 주소", "메일주소", "email", "e-mail", "mail"];
+var PERSON_HEADERS = ["담당자", "담당자명", "담당자 이름", "contact", "contact person"];
+var EMAIL_FALLBACK_COL = 12; // 0부터 세어 12 = M열
+
+function findColumn(headers, candidates) {
+  for (var i = 0; i < headers.length; i++) {
+    var h = String(headers[i] || "").trim().toLowerCase();
+    if (!h) continue;
+    for (var c = 0; c < candidates.length; c++) {
+      if (h === candidates[c].toLowerCase()) return i;
+    }
+  }
+  return -1;
+}
+
+function looksLikeEmailColumn(data, headerRowIndex, col) {
+  var checked = 0;
+  for (var r = headerRowIndex + 1; r < data.length && checked < 20; r++) {
+    var v = String((data[r] || [])[col] || "").trim();
+    if (!v) continue;
+    checked++;
+    if (v.indexOf("@") !== -1) return true;
+  }
+  return false;
+}
+
 /** 한 번의 요청으로 처리할 수 있는 최대 메일 수 (Apps Script 실행 시간 6분 제한 대비) */
 var MAX_BATCH = 20;
 
@@ -71,28 +111,50 @@ var MAX_BATCH = 20;
  * 발송 키와 보내는 사람 정보를 스크립트 속성에 저장한다.
  * 값을 고친 뒤 편집기에서 이 함수를 한 번만 실행하면 된다.
  */
+/** 아래 SEND_KEY를 이 값에서 바꾸지 않으면 저장하지 않는다 (실수로 예시가 키가 되는 것 방지) */
+var SEND_KEY_PLACEHOLDER = "여기에-아무도-모를-키를-적으세요";
+
 function setUpMailer() {
-  PropertiesService.getScriptProperties().setProperties({
-    SEND_KEY: "여기에-아무도-모를-키를-적으세요",  // 대시보드에 입력할 발송 키
-    SENDER_NAME: "",       // 보내는 사람 표시 이름 (비우면 Gmail 기본값)
-    REPLY_TO: "",          // 회신 받을 주소 (비우면 Gmail 계정 주소)
-    DAILY_CAP: "0",        // 하루 발송 상한 (0 = Gmail 자체 할당량만 적용)
-  });
-  // 여기서 Gmail을 한 번 건드려야 승인 창에 "Gmail 관련 권한"이 포함된다.
-  // (속성 저장만 하면 구글이 메일 권한을 아예 요청하지 않아서, 나중에 웹앱이 죽는다)
-  var quota = "확인 실패";
-  try {
-    quota = MailApp.getRemainingDailyQuota() + "건";
-  } catch (err) {
-    quota = "확인 실패 — " + (err && err.message ? err.message : err);
+  // ↓ 이 값을 원하는 발송 키로 바꾸세요. 대시보드에 똑같이 입력합니다.
+  var sendKey = "여기에-아무도-모를-키를-적으세요";
+
+  var senderName = "";   // 보내는 사람 표시 이름 (비우면 Gmail 기본값)
+  var replyTo = "";      // 회신 받을 주소 (비우면 Gmail 계정 주소)
+  var dailyCap = "0";    // 하루 발송 상한 (0 = Gmail 자체 할당량만 적용)
+
+  var props = PropertiesService.getScriptProperties();
+  var lines = [];
+
+  // 값을 안 고친 채로 실행하면 예시 문자열이 키가 돼버려서, 대시보드에서 계속
+  // "발송 키가 맞지 않습니다"가 뜬다. 그래서 안 고쳤으면 기존 키를 그대로 둔다.
+  if (sendKey === SEND_KEY_PLACEHOLDER) {
+    var existing = props.getProperty("SEND_KEY");
+    lines.push("[건너뜀] SEND_KEY를 아직 고치지 않아 저장하지 않았습니다.");
+    lines.push(
+      existing
+        ? "현재 저장된 발송 키: " + existing + "   ← 대시보드에 이 값을 그대로 입력하세요"
+        : "저장된 발송 키가 없습니다. 위 sendKey 값을 고치고 다시 실행하세요."
+    );
+  } else {
+    props.setProperty("SEND_KEY", sendKey);
+    lines.push("[OK] 발송 키를 저장했습니다: " + sendKey);
   }
 
-  Logger.log(
-    "설정 완료.\n" +
-      "오늘 남은 Gmail 발송 할당량: " + quota + "\n" +
-      "위 할당량이 숫자로 보이면 Gmail 권한까지 승인된 것입니다.\n" +
-      "이제 배포 > 배포 관리 > 편집(연필) > 버전 '새 버전' > 배포 를 하세요."
-  );
+  props.setProperties({ SENDER_NAME: senderName, REPLY_TO: replyTo, DAILY_CAP: dailyCap });
+
+  // 여기서 Gmail을 한 번 건드려야 승인 창에 "Gmail 관련 권한"이 포함된다.
+  // (속성 저장만 하면 구글이 메일 권한을 아예 요청하지 않아서, 나중에 웹앱이 죽는다)
+  try {
+    lines.push("[OK] 오늘 남은 Gmail 발송 할당량: " + MailApp.getRemainingDailyQuota() + "건");
+  } catch (err) {
+    lines.push("[참고] 할당량 조회 실패 — " + (err && err.message ? err.message : err));
+    lines.push("       할당량은 참고용이라 이게 실패해도 발송 자체는 됩니다.");
+  }
+
+  lines.push("코드를 고쳤다면 배포 > 배포 관리 > 편집(연필) > 버전 '새 버전' > 배포 를 하세요.");
+  lines.push("(발송 키만 바꿨다면 재배포 없이 즉시 적용됩니다)");
+
+  Logger.log(lines.join("\n"));
 }
 
 /**
@@ -137,6 +199,11 @@ function checkSetup() {
 /* ── 읽기 (대시보드 업체 목록) ─────────────────────────────────── */
 
 function doGet(e) {
+  // ?action=version → 배포 반영 여부 확인용. 업체 목록 응답 형식에는 영향을 주지 않는다.
+  if (e && e.parameter && e.parameter.action === "version") {
+    return jsonOutput({ version: SCRIPT_VERSION, sheet: SHEET_NAME });
+  }
+
   var sheet;
   try {
     sheet = getSpreadsheet().getSheetByName(SHEET_NAME);
@@ -171,6 +238,13 @@ function doGet(e) {
   });
 
   var companyNameCol = colIndex[FIELD_MAP.company_name];
+
+  var emailCol = findColumn(headers, EMAIL_HEADERS);
+  if (emailCol === -1 && looksLikeEmailColumn(data, headerRowIndex, EMAIL_FALLBACK_COL)) {
+    emailCol = EMAIL_FALLBACK_COL;
+  }
+  var personCol = findColumn(headers, PERSON_HEADERS);
+
   var rows = [];
 
   for (var r = headerRowIndex + 1; r < data.length; r++) {
@@ -182,6 +256,11 @@ function doGet(e) {
       var col = colIndex[FIELD_MAP[key]];
       record[key] = col !== undefined && row[col] !== "" ? String(row[col]) : "-";
     });
+
+    // 연락처는 비어 있는 게 정상이므로 "-" 대신 빈 문자열로 둔다.
+    record.email = emailCol === -1 ? "" : String(row[emailCol] || "").trim();
+    record.person = personCol === -1 ? "" : String(row[personCol] || "").trim();
+
     rows.push(record);
   }
 

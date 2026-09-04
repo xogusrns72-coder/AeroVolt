@@ -21,6 +21,8 @@ const TargetRow = memo(function TargetRow({
   selected,
   templates,
   syncKey,
+  sheetEmail,
+  sheetPerson,
   onToggle,
   onChange,
   onCommit,
@@ -36,9 +38,10 @@ const TargetRow = memo(function TargetRow({
   useEffect(() => {
     setEmail(storedEmail);
     setPerson(storedPerson);
-    // syncKey가 오를 때만 저장값으로 되맞춘다 — 타이핑 중에는 실행되지 않는다.
+    // syncKey가 오르거나 시트 값이 바뀔 때만 저장값으로 되맞춘다.
+    // (타이핑은 시트 값을 바꾸지 않으므로 입력 중에는 실행되지 않는다)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [syncKey]);
+  }, [syncKey, sheetEmail, sheetPerson]);
 
   useEffect(() => () => clearTimeout(flashTimer.current), []);
 
@@ -205,6 +208,8 @@ export default function TargetTable({
               selected={!!selected[p.id]}
               templates={templates}
               syncKey={syncKey}
+              sheetEmail={p.sheet_email || ""}
+              sheetPerson={p.sheet_person || ""}
               onToggle={onToggle}
               onChange={onChange}
               onCommit={onCommit}
