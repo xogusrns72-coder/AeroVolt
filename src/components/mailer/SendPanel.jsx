@@ -86,7 +86,10 @@ export default function SendPanel({
           {connection.state === "ok" && (
             <>
               <p className="mx-sendcfg-ok">
-                {connection.sender} 계정으로 발송됩니다 · 오늘 남은 Gmail 할당량 {connection.remaining}건
+                {connection.sender || "스크립트 소유자"} 계정으로 발송됩니다
+                {typeof connection.remaining === "number"
+                  ? ` · 오늘 남은 Gmail 할당량 ${connection.remaining}건`
+                  : " · 남은 할당량은 확인할 수 없습니다(권한 범위 미포함)"}
                 {connection.sentToday ? ` (오늘 ${connection.sentToday}건 발송)` : ""}
               </p>
               <div className="mx-sendcfg-row" style={{ marginTop: 8, marginBottom: 0 }}>

@@ -78,7 +78,21 @@ function setUpMailer() {
     REPLY_TO: "",          // 회신 받을 주소 (비우면 Gmail 계정 주소)
     DAILY_CAP: "0",        // 하루 발송 상한 (0 = Gmail 자체 할당량만 적용)
   });
-  Logger.log("설정 완료. 배포 > 배포 관리에서 새 버전으로 다시 배포하세요.");
+  // 여기서 Gmail을 한 번 건드려야 승인 창에 "Gmail 관련 권한"이 포함된다.
+  // (속성 저장만 하면 구글이 메일 권한을 아예 요청하지 않아서, 나중에 웹앱이 죽는다)
+  var quota = "확인 실패";
+  try {
+    quota = MailApp.getRemainingDailyQuota() + "건";
+  } catch (err) {
+    quota = "확인 실패 — " + (err && err.message ? err.message : err);
+  }
+
+  Logger.log(
+    "설정 완료.\n" +
+      "오늘 남은 Gmail 발송 할당량: " + quota + "\n" +
+      "위 할당량이 숫자로 보이면 Gmail 권한까지 승인된 것입니다.\n" +
+      "이제 배포 > 배포 관리 > 편집(연필) > 버전 '새 버전' > 배포 를 하세요."
+  );
 }
 
 /**
@@ -108,6 +122,12 @@ function checkSetup() {
   } catch (err) {
     lines.push("[실패] Gmail 권한 없음 — setUpMailer()를 실행해 권한을 승인하세요.");
   }
+
+  lines.push(
+    "[주의] 이 결과는 '편집기에서 실행할 때'의 권한 기준입니다. 배포된 웹앱은 별도로," +
+      " 배포 버전을 만들 당시의 권한으로 실행됩니다. 권한을 방금 승인했다면" +
+      " 배포 > 배포 관리 > 편집 > 버전 '새 버전' > 배포 를 한 번 해주세요."
+  );
 
   var out = lines.join("\n");
   Logger.log(out);
@@ -180,7 +200,24 @@ function doGet(e) {
  * 응답은 항상 JSON이며, 부분 실패를 알 수 있도록 메일별 결과를 함께 돌려준다.
  * Content-Type을 text/plain으로 보내야 브라우저가 CORS 프리플라이트를 걸지 않는다.
  */
+/*
+  doPost 안에서 예외가 나면 Apps Script는 CORS 헤더가 없는 HTML 오류 페이지를 돌려준다.
+  그러면 브라우저에는 이유 없이 "연결 실패"로만 보인다. 그래서 전체를 감싸서 무슨 일이
+  있어도 JSON으로 답하게 한다.
+*/
 function doPost(e) {
+  try {
+    return handlePost(e);
+  } catch (err) {
+    return jsonOutput({
+      ok: false,
+      code: "script_error",
+      message: "스크립트 실행 중 오류: " + (err && err.message ? err.message : err),
+    });
+  }
+}
+
+function handlePost(e) {
   var req;
   try {
     req = JSON.parse((e && e.postData && e.postData.contents) || "{}");
@@ -203,12 +240,14 @@ function doPost(e) {
   }
 
   if (req.action === "ping") {
+    var gmail = readGmailState();
     return jsonOutput({
       ok: true,
-      sender: getSenderAddress(),
+      sender: gmail.sender,
       senderName: props.getProperty("SENDER_NAME") || "",
       replyTo: props.getProperty("REPLY_TO") || "",
-      remaining: MailApp.getRemainingDailyQuota(),
+      remaining: gmail.remaining,
+      quotaError: gmail.quotaError,
       sentToday: getSentToday(),
       dailyCap: Number(props.getProperty("DAILY_CAP") || 0),
     });
@@ -233,15 +272,51 @@ function doPost(e) {
   return jsonOutput(deliver(req.action, messages, props));
 }
 
+/**
+ * Gmail 권한이 이 "배포 버전"에 실제로 적용됐는지 확인한다.
+ *
+ * 편집기에서 권한을 승인해도 이미 만들어진 배포 버전은 예전 권한으로 실행된다.
+ * 그래서 승인 직후에는 Gmail 호출이 예외로 죽는다 — 반드시 새 버전으로 다시 배포해야 한다.
+ */
+/**
+ * 발신 주소와 남은 할당량을 "가능한 만큼만" 읽는다.
+ *
+ * 둘 다 참고용이라 실패해도 발송을 막지 않는다. 특히 할당량 조회(MailApp)는
+ * script.send_mail 권한을 따로 요구하는데, 실제 발송(GmailApp)은 mail.google.com 권한만
+ * 있으면 된다. 참고 정보 하나 때문에 발송 전체가 막히면 안 된다.
+ */
+function readGmailState() {
+  var state = { ok: true, sender: "", remaining: null, quotaError: "" };
+
+  try {
+    state.sender = getSenderAddress() || "";
+  } catch (err) {
+    state.sender = "";
+  }
+
+  try {
+    state.remaining = MailApp.getRemainingDailyQuota();
+  } catch (err) {
+    state.remaining = null;
+    state.quotaError = String(err && err.message ? err.message : err);
+  }
+
+  return state;
+}
+
 function deliver(action, messages, props) {
   var isSend = action === "send";
+
+  var gmail = readGmailState();
   var senderName = props.getProperty("SENDER_NAME") || "";
   var replyTo = props.getProperty("REPLY_TO") || "";
   var dailyCap = Number(props.getProperty("DAILY_CAP") || 0);
 
   // 실제 발송만 할당량을 소모한다. 초안은 Gmail 발송 할당량과 무관하다.
-  if (isSend) {
-    var remaining = MailApp.getRemainingDailyQuota();
+  // 할당량을 못 읽는 경우(권한 범위 미포함)에는 사전 검사를 건너뛰고 바로 시도한다 —
+  // 실패하면 건별 결과에 그대로 남는다.
+  if (isSend && gmail.remaining !== null) {
+    var remaining = gmail.remaining;
     if (remaining < messages.length) {
       return {
         ok: false,
@@ -290,12 +365,15 @@ function deliver(action, messages, props) {
 
   if (sentCount > 0) addSentToday(sentCount);
 
+  // 발송 후 상태도 "읽을 수 있으면 읽는다" — 여기서 예외가 나서 결과를 잃으면 안 된다.
+  var after = readGmailState();
+
   return {
     ok: true,
     action: action,
     results: results,
-    sender: getSenderAddress(),
-    remaining: MailApp.getRemainingDailyQuota(),
+    sender: after.sender,
+    remaining: after.remaining,
     sentToday: getSentToday(),
   };
 }

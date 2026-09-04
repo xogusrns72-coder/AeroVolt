@@ -13,7 +13,7 @@ export const DATA_SOURCE = "sheets";
 // ※ Apps Script의 "라이브러리" URL(.../macros/library/d/...)은 여기에 넣으면 안 된다.
 //    다른 스크립트가 이 코드를 함수로 가져다 쓸 때 필요한 주소일 뿐, 웹 요청을 받지 못한다.
 export const SHEETS_API_URL =
-  "https://script.google.com/macros/s/AKfycbxUK-dCc6da5dLGEMjRNgkAT0WTTdMy29yVDRUGzUY0pEjKzOlKasdIfWAml8WJRyNY/exec";
+  "https://script.google.com/macros/s/AKfycbx0ugTdhinHIvFcCoxjHC-bIaKqtrY_FaVO3HmRdbLn8OzSJSmN-xAfLAqsOm5Mp-hi/exec";
 
 // 메일 발송(doPost) 사용 여부. false로 두면 발송 버튼이 사라지고 CSV 경로만 남는다.
 export const ENABLE_MAIL_SENDING = true;
