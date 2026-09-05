@@ -1,10 +1,10 @@
 import { GRADE_ORDER, GRADES } from "../data/constants";
 
 const RANGE_TEXT = {
-  A: "24점 이상",
-  B: "15~23점",
-  C: "8~14점",
-  D: "8점 미만",
+  A: `${GRADES.A.min}점 이상`,
+  B: `${GRADES.B.min}~${GRADES.A.min - 1}점`,
+  C: `${GRADES.C.min}~${GRADES.B.min - 1}점`,
+  D: `${GRADES.C.min}점 미만`,
 };
 
 export default function SummaryCards({ partners }) {
