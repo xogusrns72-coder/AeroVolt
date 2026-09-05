@@ -11,6 +11,7 @@ import {
   saveSendKey,
   sendMailBatch,
 } from "../../utils/appsScriptMailer";
+import { applySheetEdits, collectSheetEdits } from "../../utils/sheetWriter";
 import { TOTAL_MAX } from "../../data/criteria";
 import { DEFAULT_GRADE_FILTER, DEFAULT_MIN_SCORE, GRADE_CHIPS } from "../../data/outreachFilters";
 import TargetTable from "./TargetTable";
@@ -34,7 +35,7 @@ function timeStamp(at) {
   return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
 }
 
-export default function MailerModal({ open, onClose, partners, store }) {
+export default function MailerModal({ open, onClose, partners, store, onReloadPartners }) {
   const { data, actions, saveState, lastSavedAt, dbOn, flushSave } = store;
   const { contacts: rawContacts, sent, templates, activeTemplateId } = data;
 
@@ -61,6 +62,7 @@ export default function MailerModal({ open, onClose, partners, store }) {
   const [connection, setConnection] = useState({ state: "idle" });
   const [testAddress, setTestAddress] = useState("");
   const [testState, setTestState] = useState({ state: "idle" });
+  const [sheetSync, setSheetSync] = useState({ state: "idle" });
 
   const modalRef = useRef(null);
   const restoreFocusRef = useRef(null);
@@ -265,6 +267,40 @@ export default function MailerModal({ open, onClose, partners, store }) {
   const handleCommit = useCallback(() => {
     flushSave();
   }, [flushSave]);
+
+  /*
+    표에서 고친 연락처를 구글 시트로 올린다.
+
+    기본 흐름은 시트 → 대시보드 단방향이라, 표에서 고친 값은 그 브라우저에만 남는다.
+    팀이 공유해야 할 주소를 시트에 다시 옮겨 적는 왕복을 없애기 위한 기능이다.
+    시트 값과 다른 항목만 보낸다.
+  */
+  const sheetEdits = useMemo(
+    () => collectSheetEdits(partners, contacts),
+    [partners, contacts]
+  );
+
+  const pushToSheet = async () => {
+    if (sheetEdits.length === 0) return;
+    setSheetSync({ state: "sending" });
+    const res = await applySheetEdits(sheetEdits);
+
+    if (!res.ok) {
+      setSheetSync({ state: "error", message: res.message || "시트에 올리지 못했습니다." });
+      return;
+    }
+
+    const failed = (res.results || []).filter((r) => !r.ok);
+    setSheetSync({
+      state: failed.length ? "partial" : "ok",
+      message: failed.length
+        ? `${res.applied}건 반영, ${failed.length}건 실패 — ${failed[0].company || ""} ${failed[0].message || ""}`
+        : `${res.applied}건을 시트에 반영했습니다.`,
+    });
+
+    // 시트를 다시 읽어와야 "시트와 다른 항목" 계산이 최신이 된다.
+    if (res.applied > 0 && onReloadPartners) onReloadPartners();
+  };
 
   const applyBulk = (entries) => {
     actions.setContacts(entries);
@@ -681,7 +717,37 @@ export default function MailerModal({ open, onClose, partners, store }) {
                   >
                     이메일 일괄 붙여넣기
                   </button>
+                  <button
+                    type="button"
+                    className={`mx-btn mx-btn-sm${sheetEdits.length ? " mx-btn-primary" : ""}`}
+                    disabled={sheetEdits.length === 0 || sheetSync.state === "sending"}
+                    onClick={pushToSheet}
+                    title={
+                      sheetEdits.length === 0
+                        ? "표의 값이 시트와 같습니다"
+                        : `시트와 다른 ${sheetEdits.length}칸을 올립니다`
+                    }
+                  >
+                    {sheetSync.state === "sending"
+                      ? "올리는 중..."
+                      : sheetEdits.length
+                        ? `시트에 올리기 (${sheetEdits.length})`
+                        : "시트에 올리기"}
+                  </button>
                 </div>
+
+                {sheetSync.state !== "idle" && sheetSync.state !== "sending" && (
+                  <p className={sheetSync.state === "ok" ? "mx-sendcfg-ok" : "mx-sendcfg-bad"}>
+                    {sheetSync.message}
+                  </p>
+                )}
+
+                {sheetEdits.length > 0 && sheetSync.state === "idle" && (
+                  <p className="mx-hint" style={{ margin: "0 0 8px" }}>
+                    표에서 고친 <b>{sheetEdits.length}칸</b>이 시트와 다릅니다. 이대로 두면 이 브라우저에만
+                    남고, <b>시트에 올리기</b>를 누르면 팀 전체가 같은 값을 보게 됩니다.
+                  </p>
+                )}
 
                 {bulkOpen && (
                   <BulkPastePanel

@@ -198,6 +198,7 @@ export default function App() {
         onClose={() => setMailerOpen(false)}
         partners={partners}
         store={outreachStore}
+        onReloadPartners={() => setReloadTick((n) => n + 1)}
       />
     </div>
   );
