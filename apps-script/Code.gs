@@ -29,7 +29,7 @@
  * 브라우저에서 웹앱 URL 뒤에 ?action=version 을 붙여 열면 이 값이 보인다.
  * 편집기에서 코드를 고쳐도 "새 버전"으로 배포하지 않으면 옛 값이 그대로 나온다.
  */
-var SCRIPT_VERSION = "2026-09-04-email";
+var SCRIPT_VERSION = "2026-09-05-edit-open";
 
 var SHEET_NAME = "업체리스트";
 
@@ -118,6 +118,10 @@ function setUpMailer() {
   // ↓ 이 값을 원하는 발송 키로 바꾸세요. 대시보드에 똑같이 입력합니다.
   var sendKey = "여기에-아무도-모를-키를-적으세요";
 
+  // ↓ 시트 수정용 키. 발송 키와 따로 둔다 — 이 키가 새어나가도 메일은 못 보낸다.
+  //   시트를 외부에서 고칠 일이 없으면 빈 문자열로 두세요(수정 기능이 잠깁니다).
+  var editKey = "";
+
   var senderName = "";   // 보내는 사람 표시 이름 (비우면 Gmail 기본값)
   var replyTo = "";      // 회신 받을 주소 (비우면 Gmail 계정 주소)
   var dailyCap = "0";    // 하루 발송 상한 (0 = Gmail 자체 할당량만 적용)
@@ -141,6 +145,18 @@ function setUpMailer() {
   }
 
   props.setProperties({ SENDER_NAME: senderName, REPLY_TO: replyTo, DAILY_CAP: dailyCap });
+
+  if (editKey) {
+    props.setProperty("EDIT_KEY", editKey);
+    lines.push("[OK] 시트 수정 키를 저장했습니다: " + editKey);
+  } else {
+    var existingEdit = props.getProperty("EDIT_KEY");
+    lines.push(
+      existingEdit
+        ? "[유지] 시트 수정 키: " + existingEdit
+        : "[꺼짐] 시트 수정 키가 없습니다 — 외부에서 시트를 고칠 수 없습니다(기본값)."
+    );
+  }
 
   // 여기서 Gmail을 한 번 건드려야 승인 창에 "Gmail 관련 권한"이 포함된다.
   // (속성 저장만 하면 구글이 메일 권한을 아예 요청하지 않아서, 나중에 웹앱이 죽는다)
@@ -254,7 +270,7 @@ function doGet(e) {
     var record = {};
     Object.keys(FIELD_MAP).forEach(function (key) {
       var col = colIndex[FIELD_MAP[key]];
-      record[key] = col !== undefined && row[col] !== "" ? String(row[col]) : "-";
+      record[key] = col !== undefined && row[col] !== "" ? String(row[col]).trim() : "-";
     });
 
     // 연락처는 비어 있는 게 정상이므로 "-" 대신 빈 문자열로 둔다.
@@ -279,6 +295,123 @@ function doGet(e) {
  * 응답은 항상 JSON이며, 부분 실패를 알 수 있도록 메일별 결과를 함께 돌려준다.
  * Content-Type을 text/plain으로 보내야 브라우저가 CORS 프리플라이트를 걸지 않는다.
  */
+/**
+ * 회사명으로 행을 찾아 지정한 열의 값을 고친다.
+ *
+ * 요청 형식:
+ *   { action:"updateCells", key:"<EDIT_KEY>", dryRun:true,
+ *     edits:[ { company:"Edwincon Engineering", country:"말레이시아",
+ *               column:"이메일", value:"eet@edwincon.com.my" } ] }
+ *
+ * 안전장치
+ *  - 회사명·국가 열은 고칠 수 없다. 이 둘이 점수 데이터와의 매칭 키라서 바꾸면 점수가 끊긴다.
+ *  - 행 번호가 아니라 회사명(정규화)으로 찾고, 후보가 정확히 1개일 때만 고친다.
+ *  - dryRun:true 면 쓰지 않고 무엇이 바뀔지만 돌려준다.
+ *  - 행 추가·삭제는 하지 않는다. 되돌리려면 구글 시트의 버전 기록을 쓰면 된다.
+ */
+/**
+ * 시트 수정에 키를 요구하지 않으려면 true.
+ *
+ * ⚠️ 이 웹앱 URL은 "모든 사용자" 접근이어야 브라우저에서 호출되고, 주소가 공개 저장소와
+ *    사이트 번들에 그대로 들어 있습니다. true로 두면 URL을 아는 누구나 이 시트의 값을
+ *    고칠 수 있습니다.
+ *
+ *    작업할 때만 true로 두고 끝나면 false로 되돌리는 것을 권합니다.
+ *    false면 EDIT_KEY를 요구하고, EDIT_KEY도 비어 있으면 수정 기능 자체가 잠깁니다.
+ *    어떤 경우에도 회사명·국가 열은 고칠 수 없고, 행 추가·삭제도 하지 않습니다.
+ *    잘못 바뀌었다면 구글 시트의 파일 > 버전 기록에서 되돌릴 수 있습니다.
+ */
+var ALLOW_EDIT_WITHOUT_KEY = true;
+
+var LOCKED_COLUMNS = ["국가", "회사명"];
+var MAX_EDITS = 200;
+
+function normalizeName(v) {
+  return String(v || "").toLowerCase().replace(/[^a-z0-9가-힣]+/g, "");
+}
+
+function updateCells(req) {
+  var edits = req.edits || [];
+  if (!edits.length) return { ok: false, code: "bad_request", message: "수정할 내용이 없습니다." };
+  if (edits.length > MAX_EDITS) {
+    return { ok: false, code: "too_many", message: "한 번에 " + MAX_EDITS + "건까지만 처리합니다." };
+  }
+
+  var sheet;
+  try {
+    sheet = getSpreadsheet().getSheetByName(SHEET_NAME);
+  } catch (err) {
+    return { ok: false, code: "sheet_error", message: String(err && err.message ? err.message : err) };
+  }
+  if (!sheet) return { ok: false, code: "sheet_error", message: "'" + SHEET_NAME + "' 시트를 찾을 수 없습니다." };
+
+  var data = sheet.getDataRange().getValues();
+
+  var headerRowIndex = -1;
+  for (var i = 0; i < data.length; i++) {
+    if (data[i].indexOf("회사명") !== -1) { headerRowIndex = i; break; }
+  }
+  if (headerRowIndex === -1) return { ok: false, code: "sheet_error", message: "헤더 행을 찾지 못했습니다." };
+
+  var headers = data[headerRowIndex];
+  var nameCol = headers.indexOf("회사명");
+  var countryCol = headers.indexOf("국가");
+
+  var results = [];
+  var applied = 0;
+
+  for (var k = 0; k < edits.length; k++) {
+    var ed = edits[k] || {};
+
+    if (LOCKED_COLUMNS.indexOf(String(ed.column || "").trim()) !== -1) {
+      results.push({ company: ed.company, column: ed.column, ok: false, message: "이 열은 수정할 수 없습니다(점수 매칭 키)." });
+      continue;
+    }
+
+    var col = findColumn(headers, [String(ed.column || "")]);
+    if (col === -1) {
+      results.push({ company: ed.company, column: ed.column, ok: false, message: "그런 이름의 열이 없습니다." });
+      continue;
+    }
+
+    // 회사명 정규화 매칭. 국가가 함께 오면 그것도 맞아야 한다.
+    var key = normalizeName(ed.company);
+    var hits = [];
+    for (var r = headerRowIndex + 1; r < data.length; r++) {
+      if (!data[r][nameCol]) continue;
+      var n = normalizeName(data[r][nameCol]);
+      if (!key || (n !== key && n.indexOf(key) === -1 && key.indexOf(n) === -1)) continue;
+      if (ed.country && countryCol !== -1 && String(data[r][countryCol]).trim() !== String(ed.country).trim()) continue;
+      hits.push(r);
+    }
+
+    if (hits.length !== 1) {
+      results.push({
+        company: ed.company, column: ed.column, ok: false,
+        message: hits.length === 0 ? "일치하는 업체를 찾지 못했습니다." : hits.length + "개 업체가 걸려 모호합니다.",
+      });
+      continue;
+    }
+
+    var row = hits[0];
+    var before = String(data[row][col] || "");
+    var after = String(ed.value == null ? "" : ed.value);
+
+    if (before === after) {
+      results.push({ company: String(data[row][nameCol]), column: ed.column, ok: true, skipped: true, message: "이미 같은 값입니다." });
+      continue;
+    }
+
+    if (!req.dryRun) {
+      sheet.getRange(row + 1, col + 1).setValue(after);
+      applied++;
+    }
+    results.push({ company: String(data[row][nameCol]), row: row + 1, column: ed.column, before: before, after: after, ok: true });
+  }
+
+  return { ok: true, dryRun: !!req.dryRun, applied: applied, results: results };
+}
+
 /*
   doPost 안에서 예외가 나면 Apps Script는 CORS 헤더가 없는 HTML 오류 페이지를 돌려준다.
   그러면 브라우저에는 이유 없이 "연결 실패"로만 보인다. 그래서 전체를 감싸서 무슨 일이
@@ -305,18 +438,29 @@ function handlePost(e) {
   }
 
   var props = PropertiesService.getScriptProperties();
-  var expected = props.getProperty("SEND_KEY");
+
+  // 시트 수정은 메일 발송과 다른 키를 쓴다. 수정 키가 새어나가도 메일은 못 보내게 분리한다.
+  var isEdit = req.action === "updateCells";
+
+  // 수정 개방 모드 — 키 검사를 건너뛴다. 발송(send/draft/ping)에는 적용되지 않는다.
+  if (isEdit && ALLOW_EDIT_WITHOUT_KEY) return jsonOutput(updateCells(req));
+
+  var keyName = isEdit ? "EDIT_KEY" : "SEND_KEY";
+  var expected = props.getProperty(keyName);
 
   if (!expected) {
     return jsonOutput({
       ok: false,
       code: "not_configured",
-      message: "스크립트에 발송 키가 설정되지 않았습니다. Apps Script 편집기에서 setUpMailer()를 한 번 실행하세요.",
+      message:
+        keyName + "가 설정되지 않았습니다. Apps Script 편집기에서 setUpMailer()를 한 번 실행하세요.",
     });
   }
   if (String(req.key || "") !== String(expected)) {
-    return jsonOutput({ ok: false, code: "bad_key", message: "발송 키가 맞지 않습니다." });
+    return jsonOutput({ ok: false, code: "bad_key", message: keyName + "가 맞지 않습니다." });
   }
+
+  if (isEdit) return jsonOutput(updateCells(req));
 
   if (req.action === "ping") {
     var gmail = readGmailState();
