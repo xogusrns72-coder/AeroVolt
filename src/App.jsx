@@ -131,13 +131,7 @@ export default function App() {
     <div className="app">
       <header className="app-header">
         <div className="app-title">AeroVolt × 패브릭덕트</div>
-        <div className="app-subtitle">
-          동남아 파트너 발굴·검증 대시보드 — 검증 기준 10개 (신뢰도40 · 기술력35, 75점 만점)
-          <span className="app-subtitle-note">
-            · 1차 필터는 "시공 유형 포함" 하나로 완화, 한인 연계 기준은 후보 전체에서 해당 사례가 없어 채점에서 제외했습니다
-            · 등급 임계값은 2차 검증(등록증·재무 등)이 끝나기 전 1차 조사 점수 분포에 맞춰 조정한 임시 기준입니다
-          </span>
-        </div>
+        <div className="app-subtitle">동남아 파트너 발굴·검증 대시보드</div>
       </header>
 
       {dataError && (
