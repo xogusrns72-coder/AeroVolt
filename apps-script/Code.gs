@@ -29,7 +29,7 @@
  * 브라우저에서 웹앱 URL 뒤에 ?action=version 을 붙여 열면 이 값이 보인다.
  * 편집기에서 코드를 고쳐도 "새 버전"으로 배포하지 않으면 옛 값이 그대로 나온다.
  */
-var SCRIPT_VERSION = "2026-09-05-edit-open";
+var SCRIPT_VERSION = "2026-09-05-rw";
 
 var SHEET_NAME = "업체리스트";
 
@@ -312,19 +312,24 @@ function doGet(e) {
 /**
  * 시트 수정에 키를 요구하지 않으려면 true.
  *
- * ⚠️ 이 웹앱 URL은 "모든 사용자" 접근이어야 브라우저에서 호출되고, 주소가 공개 저장소와
- *    사이트 번들에 그대로 들어 있습니다. true로 두면 URL을 아는 누구나 이 시트의 값을
- *    고칠 수 있습니다.
+ * ⚠️ 웹앱 URL은 "모든 사용자" 접근이어야 브라우저에서 호출되고, 그 주소가 공개 저장소와
+ *    사이트 번들에 들어 있습니다. true면 URL을 아는 누구나 이 시트를 고칠 수 있습니다.
+ *    프로젝트가 끝나면 배포를 삭제하거나 이 값을 false로 되돌리세요.
+ *    (false면 EDIT_KEY를 요구하고, EDIT_KEY도 없으면 수정 기능이 잠깁니다)
  *
- *    작업할 때만 true로 두고 끝나면 false로 되돌리는 것을 권합니다.
- *    false면 EDIT_KEY를 요구하고, EDIT_KEY도 비어 있으면 수정 기능 자체가 잠깁니다.
- *    어떤 경우에도 회사명·국가 열은 고칠 수 없고, 행 추가·삭제도 하지 않습니다.
- *    잘못 바뀌었다면 구글 시트의 파일 > 버전 기록에서 되돌릴 수 있습니다.
+ * 잘못 바뀐 값은 구글 시트의 파일 > 버전 기록에서 되돌릴 수 있습니다.
  */
 var ALLOW_EDIT_WITHOUT_KEY = true;
 
-var LOCKED_COLUMNS = ["국가", "회사명"];
-var MAX_EDITS = 200;
+/**
+ * 수정을 막을 열. 비어 있으면 모든 열을 고칠 수 있다.
+ *
+ * 참고 — 회사명·국가를 바꾸면 대시보드가 그 업체의 점수를 못 찾습니다. 점수·근거 데이터가
+ * 앱에 내장돼 있고 회사명+국가로 매칭하기 때문에, 상호를 통째로 바꾸면 0점 미채점으로
+ * 표시됩니다. 오타 수정 정도는 부분일치로 잡힙니다.
+ */
+var LOCKED_COLUMNS = [];
+var MAX_EDITS = 500;
 
 function normalizeName(v) {
   return String(v || "").toLowerCase().replace(/[^a-z0-9가-힣]+/g, "");
@@ -374,26 +379,39 @@ function updateCells(req) {
       continue;
     }
 
-    // 회사명 정규화 매칭. 국가가 함께 오면 그것도 맞아야 한다.
-    var key = normalizeName(ed.company);
-    var hits = [];
-    for (var r = headerRowIndex + 1; r < data.length; r++) {
-      if (!data[r][nameCol]) continue;
-      var n = normalizeName(data[r][nameCol]);
-      if (!key || (n !== key && n.indexOf(key) === -1 && key.indexOf(n) === -1)) continue;
-      if (ed.country && countryCol !== -1 && String(data[r][countryCol]).trim() !== String(ed.country).trim()) continue;
-      hits.push(r);
-    }
+    // 행을 직접 지정했으면 그 행을 쓴다 (시트에 보이는 행 번호 그대로).
+    var row;
+    if (ed.row) {
+      row = Number(ed.row) - 1;
+      if (isNaN(row) || row <= headerRowIndex || row >= data.length) {
+        results.push({ row: ed.row, column: ed.column, ok: false, message: "그 행 번호는 범위를 벗어났습니다." });
+        continue;
+      }
+    } else {
+      // 회사명 정규화 매칭. 국가가 함께 오면 그것도 맞아야 한다.
+      var key = normalizeName(ed.company);
+      var hits = [];
+      for (var r = headerRowIndex + 1; r < data.length; r++) {
+        if (!data[r][nameCol]) continue;
+        var n = normalizeName(data[r][nameCol]);
+        if (!key || (n !== key && n.indexOf(key) === -1 && key.indexOf(n) === -1)) continue;
+        if (ed.country && countryCol !== -1 && String(data[r][countryCol]).trim() !== String(ed.country).trim()) continue;
+        hits.push(r);
+      }
 
-    if (hits.length !== 1) {
-      results.push({
-        company: ed.company, column: ed.column, ok: false,
-        message: hits.length === 0 ? "일치하는 업체를 찾지 못했습니다." : hits.length + "개 업체가 걸려 모호합니다.",
-      });
-      continue;
+      if (hits.length !== 1) {
+        // 모호하면 후보 행 번호를 돌려준다 — row로 다시 찍어 보낼 수 있게.
+        results.push({
+          company: ed.company, column: ed.column, ok: false,
+          candidates: hits.map(function (h) { return { row: h + 1, name: String(data[h][nameCol]) }; }).slice(0, 8),
+          message: hits.length === 0
+            ? "일치하는 업체를 찾지 못했습니다."
+            : hits.length + "곳이 걸립니다. row로 행을 직접 지정해주세요.",
+        });
+        continue;
+      }
+      row = hits[0];
     }
-
-    var row = hits[0];
     var before = String(data[row][col] || "");
     var after = String(ed.value == null ? "" : ed.value);
 
@@ -410,6 +428,85 @@ function updateCells(req) {
   }
 
   return { ok: true, dryRun: !!req.dryRun, applied: applied, results: results };
+}
+
+/**
+ * 시트 맨 아래에 업체를 새로 추가한다.
+ *
+ * 요청 형식:
+ *   { action:"appendRows", dryRun:false,
+ *     rows:[ { "국가":"베트남", "회사명":"...", "유형":"시공", "이메일":"a@b.com" } ] }
+ *
+ * 키는 시트의 헤더 이름 그대로 쓴다. 없는 열 이름은 무시하고 결과에 알려준다.
+ * 회사명이 이미 있으면 기본적으로 건너뛴다 (allowDuplicate:true 면 그래도 추가).
+ */
+function appendRows(req) {
+  var incoming = req.rows || [];
+  if (!incoming.length) return { ok: false, code: "bad_request", message: "추가할 행이 없습니다." };
+  if (incoming.length > MAX_EDITS) {
+    return { ok: false, code: "too_many", message: "한 번에 " + MAX_EDITS + "건까지만 처리합니다." };
+  }
+
+  var sheet;
+  try {
+    sheet = getSpreadsheet().getSheetByName(SHEET_NAME);
+  } catch (err) {
+    return { ok: false, code: "sheet_error", message: String(err && err.message ? err.message : err) };
+  }
+  if (!sheet) return { ok: false, code: "sheet_error", message: "'" + SHEET_NAME + "' 시트를 찾을 수 없습니다." };
+
+  var data = sheet.getDataRange().getValues();
+  var headerRowIndex = -1;
+  for (var i = 0; i < data.length; i++) {
+    if (data[i].indexOf("회사명") !== -1) { headerRowIndex = i; break; }
+  }
+  if (headerRowIndex === -1) return { ok: false, code: "sheet_error", message: "헤더 행을 찾지 못했습니다." };
+
+  var headers = data[headerRowIndex];
+  var nameCol = headers.indexOf("회사명");
+
+  var existing = {};
+  for (var r = headerRowIndex + 1; r < data.length; r++) {
+    if (data[r][nameCol]) existing[normalizeName(data[r][nameCol])] = r + 1;
+  }
+
+  var results = [];
+  var added = 0;
+
+  for (var k = 0; k < incoming.length; k++) {
+    var src = incoming[k] || {};
+    var name = String(src["회사명"] || "").trim();
+
+    if (!name) {
+      results.push({ ok: false, message: "회사명이 비어 있습니다." });
+      continue;
+    }
+
+    var dupRow = existing[normalizeName(name)];
+    if (dupRow && !req.allowDuplicate) {
+      results.push({ company: name, ok: false, duplicate: true, row: dupRow, message: "이미 있는 업체입니다(" + dupRow + "행)." });
+      continue;
+    }
+
+    var line = [];
+    var unknown = [];
+    for (var c = 0; c < headers.length; c++) line.push("");
+    for (var field in src) {
+      if (!Object.prototype.hasOwnProperty.call(src, field)) continue;
+      var col = findColumn(headers, [field]);
+      if (col === -1) { unknown.push(field); continue; }
+      line[col] = String(src[field] == null ? "" : src[field]);
+    }
+
+    if (!req.dryRun) {
+      sheet.appendRow(line);
+      added++;
+      existing[normalizeName(name)] = sheet.getLastRow();
+    }
+    results.push({ company: name, ok: true, unknownFields: unknown.length ? unknown : undefined });
+  }
+
+  return { ok: true, dryRun: !!req.dryRun, added: added, headers: headers, results: results };
 }
 
 /*
@@ -440,10 +537,12 @@ function handlePost(e) {
   var props = PropertiesService.getScriptProperties();
 
   // 시트 수정은 메일 발송과 다른 키를 쓴다. 수정 키가 새어나가도 메일은 못 보내게 분리한다.
-  var isEdit = req.action === "updateCells";
+  var isEdit = req.action === "updateCells" || req.action === "appendRows";
 
   // 수정 개방 모드 — 키 검사를 건너뛴다. 발송(send/draft/ping)에는 적용되지 않는다.
-  if (isEdit && ALLOW_EDIT_WITHOUT_KEY) return jsonOutput(updateCells(req));
+  if (isEdit && ALLOW_EDIT_WITHOUT_KEY) {
+    return jsonOutput(req.action === "appendRows" ? appendRows(req) : updateCells(req));
+  }
 
   var keyName = isEdit ? "EDIT_KEY" : "SEND_KEY";
   var expected = props.getProperty(keyName);
@@ -460,7 +559,9 @@ function handlePost(e) {
     return jsonOutput({ ok: false, code: "bad_key", message: keyName + "가 맞지 않습니다." });
   }
 
-  if (isEdit) return jsonOutput(updateCells(req));
+  if (isEdit) {
+    return jsonOutput(req.action === "appendRows" ? appendRows(req) : updateCells(req));
+  }
 
   if (req.action === "ping") {
     var gmail = readGmailState();
